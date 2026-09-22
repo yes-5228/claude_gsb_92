@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -13,6 +14,21 @@ import (
 	"github.com/drainage/desilting/internal/shared/option"
 	"github.com/drainage/desilting/internal/shared/refx"
 )
+
+// 台账回退原因。
+const (
+	ReversalReasonTaskCancelled = "task_cancelled"
+	ReversalReasonDeleted       = "acceptance_deleted"
+)
+
+// LedgerCleaning 验收合格写入管段清淤台账所需信息。
+type LedgerCleaning struct {
+	SegmentID    uint
+	TaskID       uint
+	AcceptanceID uint
+	CleanedAt    date.Date
+	AcceptedAt   date.Date
+}
 
 // Service 管段台账业务逻辑。
 type Service struct {
@@ -111,10 +127,40 @@ func (s *Service) BriefsByIDs(ctx context.Context, ids []uint) (map[uint]Brief, 
 	return briefs, nil
 }
 
-// MarkCleaned 验收合格后更新管段清淤统计（供验收模块调用；tx 可以为 nil）。
-func (s *Service) MarkCleaned(ctx context.Context, tx *gorm.DB, segmentID uint, cleanedAt date.Date) error {
-	if err := s.repo.MarkCleaned(ctx, tx, segmentID, cleanedAt); err != nil {
-		return httpx.WrapInternal("更新管段清淤统计失败", err)
+// AddCleaning 验收合格后写入管段清淤台账（供验收模块调用；tx 可以为 nil）。
+func (s *Service) AddCleaning(ctx context.Context, tx *gorm.DB, input LedgerCleaning) error {
+	if err := s.repo.AddCleaningLedger(ctx, tx, CleaningLedgerEntry{
+		SegmentID:    input.SegmentID,
+		TaskID:       input.TaskID,
+		AcceptanceID: input.AcceptanceID,
+		CleanedAt:    input.CleanedAt,
+		AcceptedAt:   input.AcceptedAt,
+	}); err != nil {
+		return httpx.WrapInternal("写入管段清淤台账失败", err)
+	}
+	return nil
+}
+
+// FindActiveCleaning 查询任务当前仍有效的清淤台账流水。
+func (s *Service) FindActiveCleaning(ctx context.Context, tx *gorm.DB, taskID uint) (*CleaningLedger, error) {
+	entry, err := s.repo.ActiveCleaningLedger(ctx, tx, taskID)
+	if err != nil {
+		return nil, httpx.WrapInternal("查询管段清淤台账失败", err)
+	}
+	return entry, nil
+}
+
+// ReverseCleaning 合格验收被取消或删除时追加冲销流水，并重算当前清淤统计。
+func (s *Service) ReverseCleaning(
+	ctx context.Context,
+	tx *gorm.DB,
+	active *CleaningLedger,
+	acceptanceID uint,
+	reversedAt time.Time,
+	reason string,
+) error {
+	if err := s.repo.ReverseCleaningLedger(ctx, tx, active, acceptanceID, reversedAt, reason); err != nil {
+		return httpx.WrapInternal("回退管段清淤台账失败", err)
 	}
 	return nil
 }

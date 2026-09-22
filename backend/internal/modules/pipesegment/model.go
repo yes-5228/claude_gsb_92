@@ -21,6 +21,12 @@ const (
 	TypeCombined  = "combined"  // 合流
 )
 
+// 管段清淤台账流水类型。
+const (
+	LedgerEntryAccepted = "accepted" // 验收合格写入
+	LedgerEntryReversed = "reversed" // 合格结论回退
+)
+
 // PipeSegment 管段台账。
 type PipeSegment struct {
 	ID            uint       `gorm:"primaryKey" json:"id"`
@@ -48,6 +54,31 @@ type PipeSegment struct {
 // TableName 指定表名。
 func (PipeSegment) TableName() string {
 	return "pipe_segments"
+}
+
+// CleaningLedger 管段清淤台账流水。只追加、不改写：合格时写入 +1，回退时写入 -1。
+//
+// 管段表上的累计次数和最近清淤时间由未被冲销的 +1 流水重算；-1 流水记录原作业月份，
+// 冲销发生时间保存在 reversed_at，历史月份已对外给出的统计不做物理改写。
+type CleaningLedger struct {
+	ID                   uint       `gorm:"primaryKey" json:"id"`
+	SegmentID            uint       `gorm:"index;not null" json:"segmentId"`
+	TaskID               uint       `gorm:"index;not null" json:"taskId"`
+	SourceAcceptanceID   *uint      `gorm:"index" json:"sourceAcceptanceId"`
+	CleanedAt            date.Date  `gorm:"type:date;not null" json:"cleanedAt"`
+	AcceptedAt           date.Date  `gorm:"type:date;not null" json:"acceptedAt"`
+	EventType           string     `gorm:"size:16;index;not null" json:"eventType"`
+	Delta               int        `gorm:"not null" json:"delta"`
+	ReversedAcceptanceID *uint     `gorm:"uniqueIndex" json:"-"`
+	ReversalReason      string     `gorm:"size:32" json:"reversalReason"`
+	ReversedAt          *time.Time `gorm:"index" json:"reversedAt"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// TableName 指定表名。
+func (CleaningLedger) TableName() string {
+	return "pipe_segment_cleaning_ledger"
 }
 
 // Brief 管段精简信息，供其他模块拼接展示。

@@ -165,33 +165,117 @@ func (r *Repository) Districts(ctx context.Context) ([]string, error) {
 	return districts, err
 }
 
-// MarkCleaned 更新管段的清淤统计：次数 +1，最近清淤日期取更晚的一次。
-//
-// tx 可以为 nil；不为 nil 时在该事务内执行，供验收模块与验收记录写入保持原子性。
-func (r *Repository) MarkCleaned(ctx context.Context, tx *gorm.DB, segmentID uint, cleanedAt date.Date) error {
+// CleaningLedgerEntry 记录一次验收合格对管段台账的影响。
+type CleaningLedgerEntry struct {
+	SegmentID    uint
+	TaskID       uint
+	AcceptanceID uint
+	CleanedAt    date.Date
+	AcceptedAt   date.Date
+}
+
+// ActiveCleaningLedger 查询任务当前仍有效的合格台账流水。
+func (r *Repository) ActiveCleaningLedger(ctx context.Context, tx *gorm.DB, taskID uint) (*CleaningLedger, error) {
 	db := r.db
 	if tx != nil {
 		db = tx
 	}
+	var entry CleaningLedger
+	err := db.WithContext(ctx).
+		Where("task_id = ? AND event_type = ? AND reversed_acceptance_id IS NULL", taskID, LedgerEntryAccepted).
+		First(&entry).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+// AddCleaningLedger 验收合格时写入 +1 台账流水，并重算管段当前清淤统计。
+func (r *Repository) AddCleaningLedger(ctx context.Context, tx *gorm.DB, entry CleaningLedgerEntry) error {
+	db := r.db
+	if tx != nil {
+		db = tx
+	}
+	ledger := &CleaningLedger{
+		SegmentID:          entry.SegmentID,
+		TaskID:             entry.TaskID,
+		SourceAcceptanceID: &entry.AcceptanceID,
+		CleanedAt:          entry.CleanedAt,
+		AcceptedAt:         entry.AcceptedAt,
+		EventType:          LedgerEntryAccepted,
+		Delta:              1,
+	}
+	if err := db.WithContext(ctx).Create(ledger).Error; err != nil {
+		return err
+	}
+	return r.rebuildCleaningStats(ctx, db, entry.SegmentID, true)
+}
+
+// ReverseCleaningLedger 合格验收回退时追加 -1 冲销流水。
+//
+// 不更新原 +1 流水；统计时通过 reversed_acceptance_id 排除已冲销记录。
+func (r *Repository) ReverseCleaningLedger(
+	ctx context.Context,
+	tx *gorm.DB,
+	active *CleaningLedger,
+	acceptanceID uint,
+	reversedAt time.Time,
+	reason string,
+) error {
+	db := r.db
+	if tx != nil {
+		db = tx
+	}
+	reversedAcceptanceID := acceptanceID
+	reversal := &CleaningLedger{
+		SegmentID:            active.SegmentID,
+		TaskID:               active.TaskID,
+		SourceAcceptanceID:   active.SourceAcceptanceID,
+		CleanedAt:            active.CleanedAt,
+		AcceptedAt:           active.AcceptedAt,
+		EventType:            LedgerEntryReversed,
+		Delta:                -1,
+		ReversedAcceptanceID: &reversedAcceptanceID,
+		ReversalReason:       reason,
+		ReversedAt:           &reversedAt,
+	}
+	if err := db.WithContext(ctx).Create(reversal).Error; err != nil {
+		return err
+	}
+	return r.rebuildCleaningStats(ctx, db, active.SegmentID, false)
+}
+
+// rebuildCleaningStats 按仍有效的合格流水重算累计次数与最近清淤时间。
+//
+// 只依据未冲销的合格流水更新当前台账；冲销流水保留原作业月份，不回改历史月份。
+func (r *Repository) rebuildCleaningStats(ctx context.Context, db *gorm.DB, segmentID uint, setNormal bool) error {
+	type stats struct {
+		Total         int64
+		LastCleanedAt *date.Date
+	}
+	var result stats
+	err := db.WithContext(ctx).Model(&CleaningLedger{}).
+		Select("COUNT(*) AS total, MAX(cleaned_at) AS last_cleaned_at").
+		Where("segment_id = ? AND event_type = ? AND reversed_acceptance_id IS NULL", segmentID, LedgerEntryAccepted).
+		Scan(&result).Error
+	if err != nil {
+		return err
+	}
+
 	updates := map[string]any{
-		"cleaned_times": gorm.Expr("cleaned_times + 1"),
-		"status":        StatusNormal,
-		"updated_at":    time.Now(),
+		"cleaned_times":   result.Total,
+		"updated_at":      time.Now(),
+		"last_cleaned_at": result.LastCleanedAt,
 	}
-	if !cleanedAt.IsZero() {
-		updates["last_cleaned_at"] = gorm.Expr(
-			"CASE WHEN last_cleaned_at IS NULL OR last_cleaned_at < ? THEN ? ELSE last_cleaned_at END",
-			cleanedAt.Time, cleanedAt.Time,
-		)
+	if setNormal {
+		updates["status"] = StatusNormal
 	}
-	result := db.WithContext(ctx).Model(&PipeSegment{}).Where("id = ?", segmentID).Updates(updates)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	query := db.WithContext(ctx).Model(&PipeSegment{}).
+		Where("id = ? AND (status <> ? OR ?)", segmentID, StatusBlocked, setNormal)
+	return query.Updates(updates).Error
 }
 
 // TaskStats 汇总管段下的任务状态分布。

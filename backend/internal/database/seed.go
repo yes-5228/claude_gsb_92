@@ -43,7 +43,7 @@ func Seed(db *gorm.DB, logger *slog.Logger) error {
 				Code: "PS-Y-2021-002", Name: "中山北路雨水支管", District: "城东片区", RoadName: "中山北路",
 				PipeType: pipesegment.TypeRainwater, Material: "hdpe", DiameterMm: 400, LengthM: 88, DepthM: 2.1,
 				StartManhole: "Y1-12", EndManhole: "Y1-16", BuildYear: 2015, OwnerUnit: "市政排水管理处",
-				Status: pipesegment.StatusAttention, CleanedTimes: 1, LastCleanedAt: ptrDate(today.AddDays(-17)),
+				Status: pipesegment.StatusAttention,
 				Remark: "管段存在错口，清淤后仍有少量积水",
 			},
 			{
@@ -149,8 +149,8 @@ func Seed(db *gorm.DB, logger *slog.Logger) error {
 				Priority: cleaningtask.PriorityNormal, Source: cleaningtask.SourceInspection, Method: cleaningtask.MethodManual,
 				PlanStartDate: today.AddDays(-20), PlanEndDate: today.AddDays(-16),
 				TeamName: "城东养护一班", LeaderName: "李伟", LeaderPhone: "0571-88123456",
-				Status: cleaningtask.StatusInProgress, Description: "验收发现管段错口未处理，退回整改后重新清淤",
-				StartedAt: stamp(today.AddDays(-18), 8),
+				Status: cleaningtask.StatusCompleted, Description: "验收发现管段错口，已完成整改并重新报验",
+				StartedAt: stamp(today.AddDays(-18), 8), FinishedAt: stamp(today.AddDays(-7), 16),
 			},
 			{
 				Code:  "QX" + today.AddDays(3).Format("20060102") + "-0001",
@@ -271,11 +271,29 @@ func Seed(db *gorm.DB, logger *slog.Logger) error {
 				Result: acceptance.ResultRework, Score: 55, ResidualSludgeMm: 45,
 				Issues:          "HDPE 管段错口未处理，残留淤积厚度 45 mm 超出 20 mm 的验收标准",
 				Rectification:   "联系管网维修班组对错口段进行内衬修复，处理后重新清淤并复检",
-				RectifyDeadline: ptrDate(today.AddDays(-10)), RectifiedAt: ptrDate(today.AddDays(-8)),
+				RectifyDeadline: ptrDate(today.AddDays(-10)), RectifiedAt: ptrDate(today.AddDays(-7)),
 				Remark: "整改完成后需重新提交完工报验",
 			},
 		}
 		if err := tx.Create(&acceptances).Error; err != nil {
+			return err
+		}
+
+		ledgers := []pipesegment.CleaningLedger{
+			{
+				SegmentID: segmentID["PS-Y-2021-001"], TaskID: taskID[tasks[0].Code],
+				SourceAcceptanceID: &acceptances[0].ID,
+				CleanedAt: today.AddDays(-28), AcceptedAt: today.AddDays(-25),
+				EventType: pipesegment.LedgerEntryAccepted, Delta: 1,
+			},
+			{
+				SegmentID: segmentID["PS-W-2018-014"], TaskID: taskID[tasks[1].Code],
+				SourceAcceptanceID: &acceptances[1].ID,
+				CleanedAt: today.AddDays(-21), AcceptedAt: today.AddDays(-18),
+				EventType: pipesegment.LedgerEntryAccepted, Delta: 1,
+			},
+		}
+		if err := tx.Create(&ledgers).Error; err != nil {
 			return err
 		}
 

@@ -22,6 +22,8 @@ import (
 type SegmentGateway interface {
 	FindByID(ctx context.Context, id uint) (*pipesegment.PipeSegment, error)
 	BriefsByIDs(ctx context.Context, ids []uint) (map[uint]pipesegment.Brief, error)
+	FindActiveCleaning(ctx context.Context, tx *gorm.DB, taskID uint) (*pipesegment.CleaningLedger, error)
+	ReverseCleaning(ctx context.Context, tx *gorm.DB, active *pipesegment.CleaningLedger, acceptanceID uint, reversedAt time.Time, reason string) error
 }
 
 // Service 清淤任务业务逻辑。
@@ -225,7 +227,7 @@ func (s *Service) Complete(ctx context.Context, id uint) (*CleaningTask, error) 
 	return s.FindByID(ctx, id)
 }
 
-// Cancel 取消任务：仅待开工、清淤中可取消。
+// Cancel 取消任务：待开工、清淤中、已验收可取消；取消已验收任务会回退其清淤台账。
 func (s *Service) Cancel(ctx context.Context, id uint, reason string) (*CleaningTask, error) {
 	task, err := s.FindByID(ctx, id)
 	if err != nil {
@@ -238,8 +240,36 @@ func (s *Service) Cancel(ctx context.Context, id uint, reason string) (*Cleaning
 	if trimmed == "" {
 		return nil, httpx.Validation("取消原因不能为空")
 	}
-	if err := s.repo.Transition(ctx, id, task.Status, StatusCancelled, map[string]any{"cancel_reason": trimmed}); err != nil {
-		return nil, transitionFailure(err)
+
+	if task.Status != StatusAccepted {
+		if err := s.repo.Transition(ctx, id, task.Status, StatusCancelled, map[string]any{"cancel_reason": trimmed}); err != nil {
+			return nil, transitionFailure(err)
+		}
+		return s.FindByID(ctx, id)
+	}
+
+	err = s.repo.Transaction(ctx, func(tx *gorm.DB) error {
+		pass, err := s.repo.LatestPassAcceptance(ctx, tx, id)
+		if err != nil {
+			return httpx.WrapInternal("查询合格验收记录失败", err)
+		}
+		active, err := s.segments.FindActiveCleaning(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if pass == nil || active == nil || active.SourceAcceptanceID == nil || *active.SourceAcceptanceID != pass.ID {
+			return httpx.InvalidState("已验收任务缺少对应的有效清淤台账，不能取消")
+		}
+		if err := s.repo.TransitionTx(ctx, tx, id, StatusAccepted, StatusCancelled, map[string]any{
+			"cancel_reason": trimmed,
+			"accepted_at":   nil,
+		}); err != nil {
+			return transitionFailure(err)
+		}
+		return s.segments.ReverseCleaning(ctx, tx, active, pass.ID, time.Now(), pipesegment.ReversalReasonTaskCancelled)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return s.FindByID(ctx, id)
 }
@@ -297,6 +327,8 @@ func AllowedActions(status string) []string {
 		return []string{ActionComplete, ActionEdit, ActionCancel}
 	case StatusCompleted:
 		return []string{ActionAccept}
+	case StatusAccepted:
+		return []string{ActionCancel}
 	default:
 		return []string{}
 	}

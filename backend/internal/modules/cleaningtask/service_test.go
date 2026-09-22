@@ -59,6 +59,25 @@ func TestCancelRequiresReason(t *testing.T) {
 	}
 }
 
+func TestCancelAcceptedTaskRollsBackSegmentStats(t *testing.T) {
+	fixture := testsupport.NewFixture(t)
+	task := fixture.TaskReadyForAcceptance(t, fixture.Segment.ID, "取消已验收任务")
+	_, err := fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(task.ID, 90))
+	testsupport.RequireNoError(t, err)
+
+	cancelled, err := fixture.Tasks.Cancel(context.Background(), task.ID, "验收后计划调整")
+	testsupport.RequireNoError(t, err)
+	if cancelled.Status != cleaningtask.StatusCancelled {
+		t.Fatalf("期望任务状态为已取消，实际 %s", cancelled.Status)
+	}
+
+	segment, err := fixture.Segments.FindByID(context.Background(), fixture.Segment.ID)
+	testsupport.RequireNoError(t, err)
+	if segment.CleanedTimes != 0 || segment.LastCleanedAt != nil {
+		t.Fatalf("取消已验收任务应回退台账，实际 times=%d last=%+v", segment.CleanedTimes, segment.LastCleanedAt)
+	}
+}
+
 func TestCancelledTaskCannotBeStarted(t *testing.T) {
 	fixture := testsupport.NewFixture(t)
 	task := fixture.CreateTask(t, fixture.Segment.ID, "已取消的任务")
@@ -131,7 +150,7 @@ func TestAllowedActionsFollowStatus(t *testing.T) {
 	cases := map[string][]string{
 		cleaningtask.StatusPending:   {cleaningtask.ActionStart, cleaningtask.ActionEdit, cleaningtask.ActionCancel},
 		cleaningtask.StatusCompleted: {cleaningtask.ActionAccept},
-		cleaningtask.StatusAccepted:  {},
+		cleaningtask.StatusAccepted:  {cleaningtask.ActionCancel},
 		cleaningtask.StatusCancelled: {},
 	}
 	for status, want := range cases {

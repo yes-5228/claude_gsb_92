@@ -159,7 +159,7 @@ export function AcceptanceFormPage() {
     >
       <PageHeader
         title="登记验收记录"
-        description="验收对象必须是已完成清淤并报验的任务；验收合格会同步把管段置为正常并累计清淤次数。"
+        description="验收对象必须是已完工报验的任务；只有验收合格才写入台账并把管段置为正常，需整改不计数。"
         actions={
           <button type="button" className="btn btn-ghost" onClick={() => navigate(-1)}>
             返回

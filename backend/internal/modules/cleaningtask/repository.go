@@ -78,6 +78,11 @@ func (r *Repository) MaxCodeWithPrefix(ctx context.Context, prefix string) (stri
 	return code, err
 }
 
+// Transaction 在事务中执行任务状态与管段台账联动更新。
+func (r *Repository) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
+	return r.db.WithContext(ctx).Transaction(fn)
+}
+
 // Transition 在指定前置状态下更新任务状态，避免并发下出现非法流转。
 func (r *Repository) Transition(ctx context.Context, id uint, from, to string, extra map[string]any) error {
 	return r.TransitionTx(ctx, nil, id, from, to, extra)
@@ -164,6 +169,32 @@ func (r *Repository) filtered(ctx context.Context, query ListQuery) *gorm.DB {
 		tx = tx.Where("plan_start_date <= ?", query.PlanTo.Time)
 	}
 	return tx
+}
+
+type PassAcceptance struct {
+	ID uint
+}
+
+// LatestPassAcceptance 查询任务最近一条合格验收记录。
+func (r *Repository) LatestPassAcceptance(ctx context.Context, tx *gorm.DB, taskID uint) (*PassAcceptance, error) {
+	db := r.db
+	if tx != nil {
+		db = tx
+	}
+	var result PassAcceptance
+	err := db.WithContext(ctx).Table(refx.TableAcceptanceRecords).
+		Select("id").
+		Where("task_id = ? AND result = ?", taskID, "pass").
+		Order("id DESC").
+		Limit(1).
+		Scan(&result).Error
+	if err != nil {
+		return nil, err
+	}
+	if result.ID == 0 {
+		return nil, nil
+	}
+	return &result, nil
 }
 
 // HasRecords 任务下是否已经有清淤记录。

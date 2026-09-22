@@ -33,6 +33,7 @@ const (
 //	in_progress --取消-->   cancelled
 //	completed --验收合格-->  accepted
 //	completed --验收需整改--> in_progress
+//	accepted  --取消-->     cancelled
 var allowedTransitions = map[string]map[string]bool{
 	StatusPending: {
 		StatusInProgress: true,
@@ -46,7 +47,9 @@ var allowedTransitions = map[string]map[string]bool{
 		StatusAccepted:   true,
 		StatusInProgress: true,
 	},
-	StatusAccepted:  {},
+	StatusAccepted: {
+		StatusCancelled: true,
+	},
 	StatusCancelled: {},
 }
 

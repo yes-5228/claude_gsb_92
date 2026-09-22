@@ -76,9 +76,13 @@ func TestReworkFlowReturnsTaskForRectification(t *testing.T) {
 	if reopened.Status != cleaningtask.StatusInProgress {
 		t.Fatalf("验收需整改应把任务退回清淤中，实际 %s", reopened.Status)
 	}
+	segment, err := fixture.Segments.FindByID(context.Background(), fixture.Segment.ID)
+	testsupport.RequireNoError(t, err)
+	if segment.CleanedTimes != 0 || segment.LastCleanedAt != nil {
+		t.Fatalf("验收需整改不应写入台账，实际 times=%d last=%+v", segment.CleanedTimes, segment.LastCleanedAt)
+	}
 
 	// 未登记整改完成前不允许再次验收
-	testsupport.RequireNoError(t, ignoreTask(fixture.Tasks.Complete(context.Background(), task.ID)))
 	_, err = fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(task.ID, 90))
 	appErr := testsupport.RequireAppError(t, err, httpx.CodeInvalidState)
 	if appErr.Message == "" {
@@ -92,12 +96,17 @@ func TestReworkFlowReturnsTaskForRectification(t *testing.T) {
 	})
 	testsupport.RequireNoError(t, err)
 
-	// 整改登记完成时任务已经回到待验收状态，可以直接复验
+	// 登记整改完成后任务自动回到待验收，可以直接复验
 	_, err = fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(task.ID, 88))
 	testsupport.RequireNoError(t, err)
 
 	if got := fixture.Reload(t, task.ID).Status; got != cleaningtask.StatusAccepted {
 		t.Fatalf("复验合格后任务状态应为已验收，实际 %s", got)
+	}
+	segment, err = fixture.Segments.FindByID(context.Background(), fixture.Segment.ID)
+	testsupport.RequireNoError(t, err)
+	if segment.CleanedTimes != 1 {
+		t.Fatalf("同一批作业复验合格后只应累计 1 次，实际 %d", segment.CleanedTimes)
 	}
 }
 
@@ -133,14 +142,23 @@ func TestDuplicatePassIsRejected(t *testing.T) {
 	testsupport.RequireAppError(t, err, httpx.CodeInvalidState)
 }
 
-func TestPassedAcceptanceCannotBeDeleted(t *testing.T) {
+func TestPassedAcceptanceDeleteRollsBackSegmentStats(t *testing.T) {
 	fixture := testsupport.NewFixture(t)
-	task := fixture.TaskReadyForAcceptance(t, fixture.Segment.ID, "删除校验的任务")
+	task := fixture.TaskReadyForAcceptance(t, fixture.Segment.ID, "删除合格验收的任务")
 	record, err := fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(task.ID, 90))
 	testsupport.RequireNoError(t, err)
 
 	err = fixture.Acceptances.Delete(context.Background(), record.ID)
-	testsupport.RequireAppError(t, err, httpx.CodeInvalidState)
+	testsupport.RequireNoError(t, err)
+
+	if got := fixture.Reload(t, task.ID).Status; got != cleaningtask.StatusCompleted {
+		t.Fatalf("删除合格验收后任务应回到待验收，实际 %s", got)
+	}
+	segment, err := fixture.Segments.FindByID(context.Background(), fixture.Segment.ID)
+	testsupport.RequireNoError(t, err)
+	if segment.CleanedTimes != 0 || segment.LastCleanedAt != nil {
+		t.Fatalf("删除合格验收后应回退台账，实际 times=%d last=%+v", segment.CleanedTimes, segment.LastCleanedAt)
+	}
 }
 
 func TestRectifyRejectsPassedAcceptance(t *testing.T) {
@@ -173,6 +191,28 @@ func TestListAcceptancesFiltersPendingRectify(t *testing.T) {
 	}
 	if items[0].Task == nil || items[0].Task.ID != reworkTask.ID {
 		t.Fatalf("列表项应带出所属任务信息，实际 %+v", items[0].Task)
+	}
+}
+
+func TestDeletePassedAcceptanceRestoresEarlierCleaningStats(t *testing.T) {
+	fixture := testsupport.NewFixture(t)
+	first := fixture.TaskReadyForAcceptance(t, fixture.Segment.ID, "第一次清淤")
+	firstRecord, err := fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(first.ID, 90))
+	testsupport.RequireNoError(t, err)
+
+	second := fixture.TaskReadyForAcceptance(t, fixture.Segment.ID, "第二次清淤")
+	secondRecord, err := fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(second.ID, 91))
+	testsupport.RequireNoError(t, err)
+
+	testsupport.RequireNoError(t, fixture.Acceptances.Delete(context.Background(), secondRecord.ID))
+
+	segment, err := fixture.Segments.FindByID(context.Background(), fixture.Segment.ID)
+	testsupport.RequireNoError(t, err)
+	if segment.CleanedTimes != 1 {
+		t.Fatalf("删除后剩余 1 次有效合格验收，实际 %d", segment.CleanedTimes)
+	}
+	if segment.LastCleanedAt == nil || segment.LastCleanedAt.String() != firstRecord.AcceptedAt.String() {
+		t.Fatalf("删除后最近清淤时间应恢复为上一次合格验收，实际 %+v", segment.LastCleanedAt)
 	}
 }
 

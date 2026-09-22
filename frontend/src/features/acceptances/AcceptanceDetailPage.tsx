@@ -56,7 +56,7 @@ export function AcceptanceDetailPage() {
     <div className="page">
       <PageHeader
         title={acceptance ? `${acceptance.code} 验收记录` : '验收记录详情'}
-        description="验收合格会同步更新任务状态与管段清淤统计；需整改则任务回到「清淤中」，登记整改完成后可重新报验。"
+        description="只有验收合格才写入管段清淤台账；需整改不计数，删除合格记录或取消任务会同步回退当前看板数据。"
         extra={acceptance ? <StatusTag list="acceptanceResults" value={acceptance.result} /> : null}
         actions={
           <>

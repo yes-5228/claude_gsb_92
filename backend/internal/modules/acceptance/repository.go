@@ -45,9 +45,27 @@ func (r *Repository) Save(ctx context.Context, record *AcceptanceRecord) error {
 	return r.db.WithContext(ctx).Save(record).Error
 }
 
+// SaveInTx 在给定事务中保存验收记录全部字段。
+func (r *Repository) SaveInTx(ctx context.Context, tx *gorm.DB, record *AcceptanceRecord) error {
+	record.UpdatedAt = time.Now()
+	return tx.WithContext(ctx).Save(record).Error
+}
+
 // Delete 物理删除验收记录。
 func (r *Repository) Delete(ctx context.Context, id uint) error {
 	result := r.db.WithContext(ctx).Delete(&AcceptanceRecord{}, id)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteInTx 在给定事务中物理删除验收记录。
+func (r *Repository) DeleteInTx(ctx context.Context, tx *gorm.DB, id uint) error {
+	result := tx.WithContext(ctx).Delete(&AcceptanceRecord{}, id)
 	if result.Error != nil {
 		return result.Error
 	}
