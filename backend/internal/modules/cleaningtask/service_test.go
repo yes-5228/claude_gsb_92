@@ -6,6 +6,7 @@ import (
 
 	"github.com/drainage/desilting/internal/httpx"
 	"github.com/drainage/desilting/internal/modules/cleaningtask"
+	"github.com/drainage/desilting/internal/modules/dashboard"
 	"github.com/drainage/desilting/internal/shared/date"
 	"github.com/drainage/desilting/internal/testsupport"
 )
@@ -66,6 +67,56 @@ func TestCancelledTaskCannotBeStarted(t *testing.T) {
 
 	_, err := fixture.Tasks.Start(context.Background(), task.ID)
 	testsupport.RequireAppError(t, err, httpx.CodeInvalidState)
+}
+
+func TestCancelAcceptedTaskRollsBackSegmentLedger(t *testing.T) {
+	fixture := testsupport.NewFixture(t)
+	first := fixture.TaskReadyForAcceptance(t, fixture.Segment.ID, "已验收任务一")
+	_, err := fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(first.ID, 90))
+	testsupport.RequireNoError(t, err)
+
+	second := fixture.TaskReadyForAcceptance(t, fixture.Segment.ID, "已验收任务二")
+	_, err = fixture.Acceptances.Create(context.Background(), testsupport.PassRequest(second.ID, 90))
+	testsupport.RequireNoError(t, err)
+
+	dashboardService := dashboard.NewService(fixture.DB)
+	before, err := dashboardService.Overview(context.Background())
+	testsupport.RequireNoError(t, err)
+
+	cancelled, err := fixture.Tasks.Cancel(context.Background(), first.ID, "验收结论录入错误，撤销任务")
+	testsupport.RequireNoError(t, err)
+	if cancelled.Status != cleaningtask.StatusCancelled {
+		t.Fatalf("任务应为已取消，实际 %s", cancelled.Status)
+	}
+	if cancelled.AcceptedAt != nil {
+		t.Fatal("取消已验收任务时应清空验收时间")
+	}
+
+	segment, err := fixture.Segments.FindByID(context.Background(), fixture.Segment.ID)
+	testsupport.RequireNoError(t, err)
+	if segment.CleanedTimes != 1 {
+		t.Fatalf("取消一批作业后应只保留另一批的次数，实际 %d", segment.CleanedTimes)
+	}
+	if segment.LastCleanedAt == nil || segment.LastCleanedAt.String() != date.Today().AddDays(-1).String() {
+		t.Fatalf("最近清淤时间应回退到剩余合格作业，实际 %+v", segment.LastCleanedAt)
+	}
+
+	_, err = fixture.Tasks.Cancel(context.Background(), second.ID, "两批验收结论均需撤销")
+	testsupport.RequireNoError(t, err)
+	segment, err = fixture.Segments.FindByID(context.Background(), fixture.Segment.ID)
+	testsupport.RequireNoError(t, err)
+	if segment.CleanedTimes != 0 || segment.LastCleanedAt != nil {
+		t.Fatalf("两批作业都取消后台账应完全回退，实际次数=%d 最近清淤=%+v", segment.CleanedTimes, segment.LastCleanedAt)
+	}
+
+	after, err := dashboardService.Overview(context.Background())
+	testsupport.RequireNoError(t, err)
+	if after.UncleanedSegmentCount != before.UncleanedSegmentCount+1 {
+		t.Fatalf("回退后台账未清淤数量应增加 1，before=%d after=%d", before.UncleanedSegmentCount, after.UncleanedSegmentCount)
+	}
+	if after.SludgeThisMonthM3 != before.SludgeThisMonthM3 {
+		t.Fatalf("台账回退不应改写按清淤记录计算的历史/当月清淤量，before=%v after=%v", before.SludgeThisMonthM3, after.SludgeThisMonthM3)
+	}
 }
 
 func TestAcceptedTaskCannotBeEdited(t *testing.T) {
@@ -131,7 +182,7 @@ func TestAllowedActionsFollowStatus(t *testing.T) {
 	cases := map[string][]string{
 		cleaningtask.StatusPending:   {cleaningtask.ActionStart, cleaningtask.ActionEdit, cleaningtask.ActionCancel},
 		cleaningtask.StatusCompleted: {cleaningtask.ActionAccept},
-		cleaningtask.StatusAccepted:  {},
+		cleaningtask.StatusAccepted:  {cleaningtask.ActionCancel},
 		cleaningtask.StatusCancelled: {},
 	}
 	for status, want := range cases {

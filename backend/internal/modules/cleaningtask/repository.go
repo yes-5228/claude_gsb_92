@@ -32,6 +32,11 @@ func (r *Repository) DB() *gorm.DB {
 	return r.db
 }
 
+// Transaction 在事务中执行任务写入与管段台账联动。
+func (r *Repository) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
+	return r.db.WithContext(ctx).Transaction(fn)
+}
+
 // Create 新增任务。
 func (r *Repository) Create(ctx context.Context, task *CleaningTask) error {
 	return r.db.WithContext(ctx).Create(task).Error
@@ -164,6 +169,18 @@ func (r *Repository) filtered(ctx context.Context, query ListQuery) *gorm.DB {
 		tx = tx.Where("plan_start_date <= ?", query.PlanTo.Time)
 	}
 	return tx
+}
+
+// HasUnrectifiedRework 查询任务是否存在尚未完成整改的验收记录。
+func (r *Repository) HasUnrectifiedRework(ctx context.Context, taskID uint) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Table(refx.TableAcceptanceRecords).
+		Where("task_id = ? AND result = ? AND rectified_at IS NULL", taskID, "rework").
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // HasRecords 任务下是否已经有清淤记录。

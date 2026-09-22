@@ -33,6 +33,7 @@ const (
 //	in_progress --取消-->   cancelled
 //	completed --验收合格-->  accepted
 //	completed --验收需整改--> in_progress
+//	accepted  --取消/删除合格验收--> cancelled / completed
 var allowedTransitions = map[string]map[string]bool{
 	StatusPending: {
 		StatusInProgress: true,
@@ -46,7 +47,11 @@ var allowedTransitions = map[string]map[string]bool{
 		StatusAccepted:   true,
 		StatusInProgress: true,
 	},
-	StatusAccepted:  {},
+	// accepted -> completed 仅用于删除合格验收时的内部事务回退。
+	StatusAccepted: {
+		StatusCancelled: true,
+		StatusCompleted: true,
+	},
 	StatusCancelled: {},
 }
 

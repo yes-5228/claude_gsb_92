@@ -22,6 +22,7 @@ import (
 type SegmentGateway interface {
 	FindByID(ctx context.Context, id uint) (*pipesegment.PipeSegment, error)
 	BriefsByIDs(ctx context.Context, ids []uint) (map[uint]pipesegment.Brief, error)
+	RecountCleanedInTx(ctx context.Context, tx *gorm.DB, segmentID uint) error
 }
 
 // Service 清淤任务业务逻辑。
@@ -218,6 +219,13 @@ func (s *Service) Complete(ctx context.Context, id uint) (*CleaningTask, error) 
 	if !hasRecords {
 		return nil, httpx.InvalidState("任务还没有清淤记录，请先录入清淤记录再提交完工报验")
 	}
+	unrectified, err := s.repo.HasUnrectifiedRework(ctx, id)
+	if err != nil {
+		return nil, httpx.WrapInternal("检查整改完成情况失败", err)
+	}
+	if unrectified {
+		return nil, httpx.InvalidState("上一次验收要求整改，请先登记整改完成后再提交完工报验")
+	}
 	now := time.Now()
 	if err := s.repo.Transition(ctx, id, task.Status, StatusCompleted, map[string]any{"finished_at": now}); err != nil {
 		return nil, transitionFailure(err)
@@ -238,8 +246,23 @@ func (s *Service) Cancel(ctx context.Context, id uint, reason string) (*Cleaning
 	if trimmed == "" {
 		return nil, httpx.Validation("取消原因不能为空")
 	}
-	if err := s.repo.Transition(ctx, id, task.Status, StatusCancelled, map[string]any{"cancel_reason": trimmed}); err != nil {
-		return nil, transitionFailure(err)
+
+	wasAccepted := task.Status == StatusAccepted
+	err = s.repo.Transaction(ctx, func(tx *gorm.DB) error {
+		extra := map[string]any{"cancel_reason": trimmed}
+		if wasAccepted {
+			extra["accepted_at"] = nil
+		}
+		if err := s.repo.TransitionTx(ctx, tx, id, task.Status, StatusCancelled, extra); err != nil {
+			return transitionFailure(err)
+		}
+		if wasAccepted {
+			return s.segments.RecountCleanedInTx(ctx, tx, task.PipeSegmentID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return s.FindByID(ctx, id)
 }
@@ -297,8 +320,10 @@ func AllowedActions(status string) []string {
 		return []string{ActionComplete, ActionEdit, ActionCancel}
 	case StatusCompleted:
 		return []string{ActionAccept}
+	case StatusAccepted:
+		return []string{ActionCancel}
 	default:
-		return []string{}
+		return nil
 	}
 }
 

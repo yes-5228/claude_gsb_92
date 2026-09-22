@@ -312,7 +312,10 @@ export function TaskDetailPage() {
           />
           {cancelError ? <span className="form-error">{cancelError}</span> : null}
         </div>
-        <p className="form-note">任务取消后不可再恢复，也不能继续录入清淤记录。</p>
+        <p className="form-note">
+          任务取消后不可再恢复，也不能继续录入清淤记录。
+          {task?.status === 'accepted' ? '该任务已验收，取消后会同步回退管段清淤次数与最近清淤时间。' : ''}
+        </p>
       </Modal>
     </div>
   );

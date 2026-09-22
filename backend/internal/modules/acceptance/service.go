@@ -30,7 +30,8 @@ type TaskGateway interface {
 // SegmentGateway 管段台账对外提供的能力（由 pipesegment.Service 实现）。
 type SegmentGateway interface {
 	FindByID(ctx context.Context, id uint) (*pipesegment.PipeSegment, error)
-	MarkCleaned(ctx context.Context, tx *gorm.DB, segmentID uint, cleanedAt date.Date) error
+	// RecountCleanedInTx 根据当前有效合格任务重算管段清淤成果。
+	RecountCleanedInTx(ctx context.Context, tx *gorm.DB, segmentID uint) error
 }
 
 // RecordGateway 清淤记录模块对外提供的能力（由 cleaningrecord.Service 实现）。
@@ -53,8 +54,8 @@ func NewService(repo *Repository, tasks TaskGateway, segments SegmentGateway, re
 
 // Create 登记验收记录。
 //
-// 验收合格会把任务推进到"已验收"并回写管段清淤统计；
-// 验收需整改会把任务退回"清淤中"，等待整改完成后复验。
+// 验收合格会把任务推进到"已验收"并重算管段清淤统计；
+// 验收需整改会把任务退回"清淤中"，整改完成并重新完工报验后复验。
 // 记录的写入与任务、管段的联动更新在同一个事务内完成。
 func (s *Service) Create(ctx context.Context, req SaveRequest) (*AcceptanceRecord, error) {
 	task, err := s.tasks.FindByID(ctx, req.TaskID)
@@ -118,10 +119,20 @@ func (s *Service) Create(ctx context.Context, req SaveRequest) (*AcceptanceRecor
 	for attempt := 0; attempt < 5; attempt++ {
 		record.Code = s.nextCode(ctx, record.AcceptedAt)
 		err = s.repo.Transaction(ctx, func(tx *gorm.DB) error {
+			latest, err := s.repo.LatestByTaskInTx(ctx, tx, req.TaskID)
+			if err != nil {
+				return httpx.WrapInternal("查询历史验收记录失败", err)
+			}
+			if latest != nil && latest.Result == ResultPass {
+				return httpx.InvalidState("该任务已经验收合格，不能重复登记验收")
+			}
+			if latest != nil && latest.RectifiedAt == nil {
+				return httpx.InvalidState("上一次验收结论为需整改且尚未登记整改完成，请先完成整改再复验")
+			}
 			if err := s.repo.CreateInTx(ctx, tx, record); err != nil {
 				return err
 			}
-			return s.applyOutcome(ctx, tx, task, record, totals)
+			return s.applyOutcome(ctx, tx, task, record)
 		})
 		if err == nil {
 			return record, nil
@@ -137,7 +148,7 @@ func (s *Service) Create(ctx context.Context, req SaveRequest) (*AcceptanceRecor
 	return nil, httpx.Conflict("验收编号生成冲突，请稍后重试")
 }
 
-// Rectify 登记整改完成，之后任务可以重新报验。
+// Rectify 登记整改完成，之后任务需要重新完工报验并复验。
 func (s *Service) Rectify(ctx context.Context, id uint, req RectifyRequest) (*AcceptanceRecord, error) {
 	record, err := s.repo.FindByID(ctx, id)
 	if err != nil {
@@ -179,26 +190,47 @@ func (s *Service) Rectify(ctx context.Context, id uint, req RectifyRequest) (*Ac
 	return record, nil
 }
 
-// Delete 删除验收记录。验收结论为合格或任务已验收的，不允许删除。
+// Delete 删除验收记录，并回退它所驱动的任务状态与管段台账。
 func (s *Service) Delete(ctx context.Context, id uint) error {
 	record, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return notFound(err)
 	}
-	if record.Result == ResultPass {
-		return httpx.InvalidState("验收结论为合格的记录不允许删除")
-	}
 	task, err := s.tasks.FindByID(ctx, record.TaskID)
 	if err != nil {
 		return err
 	}
-	if task.Status == cleaningtask.StatusAccepted {
-		return httpx.InvalidState("任务已验收合格，不能再删除验收记录")
+
+	isLatest, err := s.repo.IsLatestByTask(ctx, record.ID, record.TaskID)
+	if err != nil {
+		return httpx.WrapInternal("检查验收记录顺序失败", err)
 	}
-	if err := s.repo.Delete(ctx, id); err != nil {
-		return notFound(err)
+	if !isLatest {
+		return httpx.InvalidState("只能删除任务最近一次验收记录，请先删除后续复验记录")
 	}
-	return nil
+
+	return s.repo.Transaction(ctx, func(tx *gorm.DB) error {
+		if record.Result == ResultPass {
+			if task.Status != cleaningtask.StatusAccepted {
+				return httpx.InvalidState("任务状态与合格验收记录不一致，不能删除该记录")
+			}
+			if err := s.tasks.TransitionInTx(ctx, tx, task.ID,
+				cleaningtask.StatusAccepted, cleaningtask.StatusCompleted,
+				map[string]any{"accepted_at": nil}); err != nil {
+				return err
+			}
+			if err := s.segments.RecountCleanedInTx(ctx, tx, task.PipeSegmentID); err != nil {
+				return err
+			}
+		} else if task.Status == cleaningtask.StatusInProgress {
+			if err := s.tasks.TransitionInTx(ctx, tx, task.ID,
+				cleaningtask.StatusInProgress, cleaningtask.StatusCompleted,
+				map[string]any{"finished_at": nil}); err != nil {
+				return err
+			}
+		}
+		return s.repo.DeleteInTx(ctx, tx, id)
+	})
 }
 
 // FindByID 查询验收记录。
@@ -287,7 +319,6 @@ func (s *Service) applyOutcome(
 	tx *gorm.DB,
 	task *cleaningtask.CleaningTask,
 	record *AcceptanceRecord,
-	totals refx.RecordTotals,
 ) error {
 	if record.Result == ResultRework {
 		return s.tasks.TransitionInTx(ctx, tx, task.ID,
@@ -305,11 +336,7 @@ func (s *Service) applyOutcome(
 		return err
 	}
 
-	cleanedAt := totals.LatestCleanedAt
-	if cleanedAt.IsZero() {
-		cleanedAt = record.AcceptedAt
-	}
-	return s.segments.MarkCleaned(ctx, tx, task.PipeSegmentID, cleanedAt)
+	return s.segments.RecountCleanedInTx(ctx, tx, task.PipeSegmentID)
 }
 
 // validate 校验验收字段，并保证验收结论与评分、整改要求相互一致。

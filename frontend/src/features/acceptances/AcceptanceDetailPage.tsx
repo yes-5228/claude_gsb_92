@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { acceptanceApi } from '../../api/acceptances';
 import { toErrorMessage } from '../../api/client';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { InfoList } from '../../components/InfoList';
 import { Modal } from '../../components/Modal';
 import { PageHeader } from '../../components/PageHeader';
@@ -30,6 +31,7 @@ export function AcceptanceDetailPage() {
   const [rectification, setRectification] = useState('');
   const [remark, setRemark] = useState('');
   const [busy, setBusy] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const acceptance = detail.data?.acceptance;
   const task = detail.data?.task;
@@ -40,7 +42,7 @@ export function AcceptanceDetailPage() {
     setBusy(true);
     try {
       await acceptanceApi.rectify(id, { rectifiedAt, rectification: rectification.trim(), remark: remark.trim() });
-      toast.success('整改完成情况已登记，可由验收人重新验收');
+      toast.success('整改完成情况已登记，请重新提交完工报验');
       setRectifyOpen(false);
       setRectification('');
       setRemark('');
@@ -52,11 +54,25 @@ export function AcceptanceDetailPage() {
     }
   };
 
+  const submitDelete = async () => {
+    setBusy(true);
+    try {
+      await acceptanceApi.remove(id);
+      toast.success('验收记录已删除，台账已按当前有效合格任务重算');
+      navigate('/acceptances');
+    } catch (cause: unknown) {
+      toast.error(toErrorMessage(cause));
+      setDeleteOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="page">
       <PageHeader
         title={acceptance ? `${acceptance.code} 验收记录` : '验收记录详情'}
-        description="验收合格会同步更新任务状态与管段清淤统计；需整改则任务回到「清淤中」，登记整改完成后可重新报验。"
+        description="验收合格会同步任务状态并重算管段清淤台账；需整改则任务回到「清淤中」，登记整改并重新报验后复验。"
         extra={acceptance ? <StatusTag list="acceptanceResults" value={acceptance.result} /> : null}
         actions={
           <>
@@ -73,6 +89,9 @@ export function AcceptanceDetailPage() {
                 登记整改完成
               </button>
             ) : null}
+            <button type="button" className="btn btn-danger" onClick={() => setDeleteOpen(true)}>
+              删除
+            </button>
           </>
         }
       />
@@ -90,13 +109,13 @@ export function AcceptanceDetailPage() {
               <div className="alert alert-warn">
                 <p>
                   该验收结论为「需整改」，整改期限 {formatDate(acceptance.rectifyDeadline)}
-                  ，完成任务整改登记后才能重新报验。
+                  ，登记整改完成并重新完工报验后才能复验。
                 </p>
               </div>
             ) : null}
             {acceptance.result === 'rework' && acceptance.rectifiedAt ? (
               <div className="alert alert-success">
-                <p>整改已于 {formatDate(acceptance.rectifiedAt)} 完成，任务可重新报验。</p>
+                <p>整改已于 {formatDate(acceptance.rectifiedAt)} 完成，请重新提交完工报验后复验。</p>
               </div>
             ) : null}
 
@@ -157,6 +176,23 @@ export function AcceptanceDetailPage() {
           </>
         ) : null}
       </StateBlock>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        title="删除验收记录"
+        danger
+        busy={busy}
+        confirmText="确认删除"
+        message={
+          acceptance?.result === 'pass' ? (
+            <p>删除合格验收后，任务将退回待验收，管段清淤次数与最近清淤时间会同步回退；原始清淤记录和历史月份清淤量不会删除或改写。</p>
+          ) : (
+            <p>删除需整改验收后，任务将退回待验收，可重新登记验收结论。</p>
+          )
+        }
+        onConfirm={() => void submitDelete()}
+        onCancel={() => setDeleteOpen(false)}
+      />
 
       <Modal
         open={rectifyOpen}

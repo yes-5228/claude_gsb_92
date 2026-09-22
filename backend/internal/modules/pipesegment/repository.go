@@ -165,26 +165,66 @@ func (r *Repository) Districts(ctx context.Context) ([]string, error) {
 	return districts, err
 }
 
-// MarkCleaned 更新管段的清淤统计：次数 +1，最近清淤日期取更晚的一次。
+// CleaningSummary 管段当前有效清淤成果，只统计已验收合格的任务。
+type CleaningSummary struct {
+	CleanedTimes  int
+	LastCleanedAt *date.Date
+}
+
+// CleaningSummaryForSegment 重算单个管段的清淤台账。
 //
-// tx 可以为 nil；不为 nil 时在该事务内执行，供验收模块与验收记录写入保持原子性。
-func (r *Repository) MarkCleaned(ctx context.Context, tx *gorm.DB, segmentID uint, cleanedAt date.Date) error {
+// 一个任务即一批作业，无论经历多少次需整改/复验，最多贡献一次清淤次数；
+// 最近清淤时间取该管段下所有已验收任务的最晚清淤记录日期，任务没有记录时退回验收日期。
+// tx 为 nil 时使用仓储自身连接。
+func (r *Repository) CleaningSummaryForSegment(ctx context.Context, tx *gorm.DB, segmentID uint) (CleaningSummary, error) {
 	db := r.db
 	if tx != nil {
 		db = tx
 	}
-	updates := map[string]any{
-		"cleaned_times": gorm.Expr("cleaned_times + 1"),
-		"status":        StatusNormal,
-		"updated_at":    time.Now(),
+
+	var summary struct {
+		Total         int
+		LastCleanedAt *date.Date
 	}
-	if !cleanedAt.IsZero() {
-		updates["last_cleaned_at"] = gorm.Expr(
-			"CASE WHEN last_cleaned_at IS NULL OR last_cleaned_at < ? THEN ? ELSE last_cleaned_at END",
-			cleanedAt.Time, cleanedAt.Time,
-		)
+	err := db.WithContext(ctx).Table(refx.TableCleaningTasks+" AS t").
+		Select(`COUNT(*) AS total, MAX(COALESCE(r.latest_cleaned_at, DATE(t.accepted_at))) AS last_cleaned_at`).
+		Joins(`LEFT JOIN (
+			SELECT task_id, MAX(cleaned_at) AS latest_cleaned_at
+			FROM `+refx.TableCleaningRecords+`
+			GROUP BY task_id
+		) AS r ON r.task_id = t.id`).
+		Where("t.pipe_segment_id = ? AND t.status = ?", segmentID, "accepted").
+		Scan(&summary).Error
+	if err != nil {
+		return CleaningSummary{}, err
 	}
-	result := db.WithContext(ctx).Model(&PipeSegment{}).Where("id = ?", segmentID).Updates(updates)
+	return CleaningSummary{CleanedTimes: summary.Total, LastCleanedAt: summary.LastCleanedAt}, nil
+}
+
+// ReplaceCleaningSummary 用当前有效合格任务重算并覆盖管段清淤统计。
+//
+// 重算后仍有合格作业时，管段运行状态同步为正常；回退到 0 次时保留人工维护的当前状态。
+func (r *Repository) ReplaceCleaningSummary(
+	ctx context.Context,
+	tx *gorm.DB,
+	segmentID uint,
+	summary CleaningSummary,
+) error {
+	db := r.db
+	if tx != nil {
+		db = tx
+	}
+	result := db.WithContext(ctx).Model(&PipeSegment{}).
+		Where("id = ?", segmentID).
+		Updates(map[string]any{
+			"cleaned_times":   summary.CleanedTimes,
+			"last_cleaned_at": summary.LastCleanedAt,
+			"status": gorm.Expr(
+				"CASE WHEN ? > 0 THEN ? ELSE status END",
+				summary.CleanedTimes, StatusNormal,
+			),
+			"updated_at": time.Now(),
+		})
 	if result.Error != nil {
 		return result.Error
 	}

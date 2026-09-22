@@ -167,7 +167,7 @@ export function AcceptanceListPage() {
     <div className="page">
       <PageHeader
         title="验收记录"
-        description="对完工报验的清淤任务登记验收结论；验收合格后任务归档且管段清淤次数自动累计，需整改的任务回到清淤中。"
+        description="对完工报验的清淤任务登记验收结论；验收合格后按当前有效合格任务重算管段台账，需整改任务登记整改并重新报验后复验。"
         actions={
           <button type="button" className="btn btn-primary" onClick={() => navigate('/acceptances/new')}>
             登记验收

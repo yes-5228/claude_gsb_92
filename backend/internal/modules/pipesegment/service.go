@@ -9,7 +9,6 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/drainage/desilting/internal/httpx"
-	"github.com/drainage/desilting/internal/shared/date"
 	"github.com/drainage/desilting/internal/shared/option"
 	"github.com/drainage/desilting/internal/shared/refx"
 )
@@ -111,9 +110,13 @@ func (s *Service) BriefsByIDs(ctx context.Context, ids []uint) (map[uint]Brief, 
 	return briefs, nil
 }
 
-// MarkCleaned 验收合格后更新管段清淤统计（供验收模块调用；tx 可以为 nil）。
-func (s *Service) MarkCleaned(ctx context.Context, tx *gorm.DB, segmentID uint, cleanedAt date.Date) error {
-	if err := s.repo.MarkCleaned(ctx, tx, segmentID, cleanedAt); err != nil {
+// RecountCleanedInTx 按当前已验收合格任务重算管段清淤统计（供验收/任务联动；tx 可以为 nil）。
+func (s *Service) RecountCleanedInTx(ctx context.Context, tx *gorm.DB, segmentID uint) error {
+	summary, err := s.repo.CleaningSummaryForSegment(ctx, tx, segmentID)
+	if err != nil {
+		return httpx.WrapInternal("重算管段清淤统计失败", err)
+	}
+	if err := s.repo.ReplaceCleaningSummary(ctx, tx, segmentID, summary); err != nil {
 		return httpx.WrapInternal("更新管段清淤统计失败", err)
 	}
 	return nil

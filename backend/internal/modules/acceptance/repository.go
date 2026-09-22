@@ -45,7 +45,7 @@ func (r *Repository) Save(ctx context.Context, record *AcceptanceRecord) error {
 	return r.db.WithContext(ctx).Save(record).Error
 }
 
-// Delete 物理删除验收记录。
+// Delete 物理删除验收记录（通常使用 DeleteInTx，保证与任务/台账回退原子提交）。
 func (r *Repository) Delete(ctx context.Context, id uint) error {
 	result := r.db.WithContext(ctx).Delete(&AcceptanceRecord{}, id)
 	if result.Error != nil {
@@ -55,6 +55,27 @@ func (r *Repository) Delete(ctx context.Context, id uint) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// DeleteInTx 在给定事务中物理删除验收记录。
+func (r *Repository) DeleteInTx(ctx context.Context, tx *gorm.DB, id uint) error {
+	result := tx.WithContext(ctx).Delete(&AcceptanceRecord{}, id)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// IsLatestByTask 判断验收记录是否为该任务最近一次验收。
+func (r *Repository) IsLatestByTask(ctx context.Context, id, taskID uint) (bool, error) {
+	latest, err := r.LatestByTask(ctx, taskID)
+	if err != nil || latest == nil {
+		return false, err
+	}
+	return latest.ID == id, nil
 }
 
 // FindByID 按主键查询。
@@ -74,6 +95,23 @@ func (r *Repository) FindByID(ctx context.Context, id uint) (*AcceptanceRecord, 
 func (r *Repository) LatestByTask(ctx context.Context, taskID uint) (*AcceptanceRecord, error) {
 	var record AcceptanceRecord
 	err := r.db.WithContext(ctx).
+		Where("task_id = ?", taskID).
+		Order("id DESC").
+		Limit(1).
+		Find(&record).Error
+	if err != nil {
+		return nil, err
+	}
+	if record.ID == 0 {
+		return nil, nil
+	}
+	return &record, nil
+}
+
+// LatestByTaskInTx 在给定事务中查询任务最近一次验收记录，没有时返回 nil。
+func (r *Repository) LatestByTaskInTx(ctx context.Context, tx *gorm.DB, taskID uint) (*AcceptanceRecord, error) {
+	var record AcceptanceRecord
+	err := tx.WithContext(ctx).
 		Where("task_id = ?", taskID).
 		Order("id DESC").
 		Limit(1).
